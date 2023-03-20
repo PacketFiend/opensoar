@@ -15,7 +15,7 @@ class Task:
     ENL_TIME_THRESHOLD = 30
 
     def __init__(self, waypoints: List[Waypoint], timezone: int, start_opening: datetime.time, start_time_buffer: int,
-                 multistart: bool):
+                 multistart: bool, start):
         """
         :param waypoints:
         :param timezone: time difference wrt UTC in hours
@@ -135,11 +135,24 @@ class Task:
         return distance
 
     def started(self, fix1, fix2):
+        # Also finds if we crossed a start point flying the other direction.
+        # This covers cases where the same set of waypoints is used for the return trip
+        # of a cross country flight. It also returns strange results if we're flying
+        # around our start point, which can be the case if we're just farting around
+        # but have waypoints programmed from a previous flight.
         start = self.waypoints[0]
+        started = False
+        backwards = False
+
         if start.is_line:
             return start.crossed_line(fix1, fix2)
         else:
-            return start.inside_sector(fix1) and start.outside_sector(fix2)
+            if start.inside_sector(fix1) and start.outside_sector(fix2):
+                started = True
+            elif start.inside_sector(fix2) and start.outside_sector(fix1):
+                started = True
+                backwards = True
+            return started, fix2, backwards
 
     def finished(self, fix1, fix2):
         finish = self.waypoints[-1]
@@ -155,6 +168,11 @@ class Task:
         for fix, next_fix in double_iterator(interpolated_fixes):
             if self.started(fix, next_fix):
                 return fix['time']
+
+        # If we didn't make it to the start gate, just use the first waypoint. Print a warning.
+        # print("WARNING: Start point not reached. Using first waypoint.")
+        # return self.waypoints[0]
+
 
         raise ValueError('Start should have been determined')
 

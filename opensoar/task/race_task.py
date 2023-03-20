@@ -1,6 +1,7 @@
 from opensoar.task.task import Task
 from opensoar.utilities.helper_functions import calculate_distance_bearing, double_iterator, \
     seconds_time_difference_fixes, add_seconds
+import geopy.distance
 
 
 class RaceTask(Task):
@@ -8,7 +9,7 @@ class RaceTask(Task):
     Race task.
     """
 
-    def __init__(self, waypoints, timezone=None, start_opening=None, start_time_buffer=0, multistart=False):
+    def __init__(self, waypoints, timezone=None, start_opening=None, start_time_buffer=0, multistart=False, start=None):
         """
         :param waypoints:           see super()
         :param timezone:            see super()
@@ -16,9 +17,11 @@ class RaceTask(Task):
         :param start_time_buffer:   see super()
         :param multistart:          see super()
         """
-        super().__init__(waypoints, timezone, start_opening, start_time_buffer, multistart)
+        super().__init__(waypoints, timezone, start_opening, start_time_buffer, multistart, start)
+        self.previous_fix = None
 
         self.distances = self.calculate_task_distances()
+        self.leg = -1
 
     def __eq__(self, other):
         return super().__eq__(other)
@@ -77,18 +80,23 @@ class RaceTask(Task):
 
         return distances
 
-    def apply_rules(self, trace):
+    def apply_rules(self, trace, start=None):
 
-        fixes, outlanding_fix = self.determine_trip_fixes(trace)
+        fixes, outlanding_fix = self.determine_trip_fixes(trace, start)
         distances = self.determine_trip_distances(fixes, outlanding_fix)
-        refined_start = self.determine_refined_start(trace, fixes)
+        if start is None:
+            refined_start = self.determine_refined_start(trace, fixes)
+        else:
+            refined_start = start
         finish_time = fixes[-1]['time']
 
         return fixes, refined_start, outlanding_fix, distances, finish_time
 
-    def determine_trip_fixes(self, trace):
+    def determine_trip_fixes(self, trace, start=None):
 
-        leg = -1
+        # If we couldn't determine a start fix, ignore leg -1 (the portion before the start)
+        if start is not None:
+            self.leg = 0
         enl_first_fix = None
         enl_registered = False
 
@@ -110,32 +118,38 @@ class RaceTask(Task):
             else:
                 after_start_opening = add_seconds(fix['time'], self.start_time_buffer) > self.start_opening
 
-            if leg == -1 and after_start_opening:
-                if self.started(fix_minus1, fix):
+            if self.leg == -1 and after_start_opening:
+                started, fix, backwards = self.started(fix_minus1, fix)
+                if started:
+                    fix_minus1['comment'] = "START"
                     fixes.append(fix_minus1)
                     start_fixes.append(fix_minus1)
-                    leg += 1
+                    self.leg += 1
                     enl_first_fix = None
                     enl_registered = False
-            elif leg == 0:
-                if self.started(fix_minus1, fix):  # restart
+            elif self.leg == 0:
+                started, fix, backwards = self.started(fix_minus1, fix)
+                if started:  # restart
                     fixes[0] = fix_minus1
+                    fix_minus1['comment'] = "RESTART"
                     start_fixes.append(fix_minus1)
                     enl_first_fix = None
                     enl_registered = False
-                if self.finished_leg(leg, fix_minus1, fix) and not enl_registered:
+                finished, fix = self.finished_leg(self.leg, fix_minus1, fix)
+                if finished and not enl_registered:
                     fixes.append(fix)
-                    leg += 1
-            elif 0 < leg < self.no_legs:
-                if self.finished_leg(leg, fix_minus1, fix) and not enl_registered:
+                    self.leg += 1
+            elif 0 < self.leg < self.no_legs:
+                finished, fix = self.finished_leg(self.leg, fix_minus1, fix)
+                if finished and not enl_registered:
                     fixes.append(fix)
-                    leg += 1
+                    self.leg += 1
 
         enl_fix = enl_first_fix if enl_registered else None
 
         outlanding_fix = None
-        if len(fixes) is not len(self.waypoints):
-            outlanding_fix = self.determine_outlanding_fix(trace, fixes, start_fixes, enl_fix)
+        # if len(fixes) is not len(self.waypoints):
+        #     outlanding_fix = self.determine_outlanding_fix(trace, fixes, start_fixes, enl_fix)
 
         return fixes, outlanding_fix
 
@@ -193,8 +207,28 @@ class RaceTask(Task):
     def finished_leg(self, leg, fix1, fix2):
         """Determines whether leg is finished."""
 
-        next_waypoint = self.waypoints[leg + 1]
-        if next_waypoint.is_line:
-            return next_waypoint.crossed_line(fix1, fix2)
-        else:
-            return next_waypoint.outside_sector(fix1) and next_waypoint.inside_sector(fix2)
+        i = 0
+        finished = False
+        while i < len(self.waypoints) - (leg+1):
+            i += 1
+            next_waypoint = self.waypoints[leg + i]
+            if next_waypoint.is_line:
+                finished = next_waypoint.crossed_line(fix1, fix2)
+            else:
+                finished = next_waypoint.outside_sector(fix1) and next_waypoint.inside_sector(fix2)
+            if finished:
+                break
+
+        if finished:
+            if self.previous_fix is not None:
+                distance = geopy.distance.geodesic((fix2['lat'], fix1['lon']), (self.previous_fix['lat'], self.previous_fix['lon'])).meters
+                # Covers edge cases where we are thermalling at the r_max radius and a few others
+                if distance < 1000:
+                    finished = False
+            # Did we miss a waypoint?
+            if i > 1 and finished:
+                self.leg += i-1
+            self.previous_fix = fix2
+            fix2['comment'] = next_waypoint.name
+
+        return finished, fix2

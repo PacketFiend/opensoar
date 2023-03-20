@@ -6,9 +6,9 @@ class Trip:
     Realised
     """
 
-    def __init__(self, task, trace):
+    def __init__(self, task, trace, start=None):
 
-        task_result = task.apply_rules(trace)
+        task_result = task.apply_rules(trace, start)
 
         self.fixes = task_result[0]
         self.refined_start_time = task_result[1]
